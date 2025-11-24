@@ -9,7 +9,7 @@ LABEL org.opencontainers.image.authors="labring"
 USER root
 ENV HOME /root
 ARG kubeVersion=1.25.6
-ARG ttydVersion=1.7.3
+ARG ttydVersion=1.7.7
 ARG helmVersion=3.12.0
 ARG TARGETARCH
 ARG ARCH=${TARGETARCH}
