@@ -16,7 +16,6 @@ ARG ARCH=${TARGETARCH}
 ARG DEBIAN_FRONTEND=noninteractive
 
 WORKDIR /root
-COPY ./inline.html ./index.html
 COPY vim/ .
 COPY scripts/start-terminal.sh /usr/bin/
 COPY scripts/ttyd-kubectl.sh /usr/bin/
