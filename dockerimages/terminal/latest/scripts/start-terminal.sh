@@ -25,16 +25,10 @@ users:
 EOF
 
 ENV CREDENTIAL_OPTION ""
-ENV AUTH_HEADER_OPTION ""
 
 if [ -n "$CREDENTIAL" ]
 then
     CREDENTIAL_OPTION="-c $CREDENTIAL"
 fi
 
-if [ -n "$AUTH_HEADER" ]
-then
-    AUTH_HEADER_OPTION="-H $AUTH_HEADER"
-fi
-
-ttyd -p 8080 --writable $AUTH_HEADER_OPTION $CREDENTIAL_OPTION bash
+ttyd -p 8080 --writable $CREDENTIAL_OPTION bash

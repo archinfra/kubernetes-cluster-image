@@ -39,7 +39,6 @@ ENV USER_TOKEN ""
 ENV APISERVER "https://apiserver.cluster.local:6443"
 ENV USER_NAME "admin"
 ENV NAMESPACE "default"
-ENV AUTH_HEADER ""
 ENV CREDENTIAL ""
 
 EXPOSE 8080
