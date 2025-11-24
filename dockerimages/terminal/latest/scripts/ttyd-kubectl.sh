@@ -24,7 +24,7 @@ if [ $? != 0 ]; then
    exit 1
 fi
 
-wget https://github.com/tsl0922/ttyd/releases/download/${ttydVersion}/ttyd.${_ARCH} && chmod +x ttyd.${_ARCH} && mv ttyd.${_ARCH} /usr/bin/ttyd
+wget https://github.com/labring/ttyd/releases/download/${ttydVersion}/ttyd.${_ARCH} && chmod +x ttyd.${_ARCH} && mv ttyd.${_ARCH} /usr/bin/ttyd
 if [ $? != 0 ]; then
    echo "====download ttyd failed!===="
    exit 1
