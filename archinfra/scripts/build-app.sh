@@ -43,7 +43,8 @@ done
 
 GHCR_IMAGE="${GHCR_REPOSITORY}:${APP_VERSION}-${BUILD_ARCH}"
 WORK_DIR="$(mktemp -d)"
-trap 'rm -rf "$WORK_DIR"' EXIT
+# sealos build runs rootful and may create root-owned offline-registry files in WORK_DIR.
+trap 'sudo rm -rf "$WORK_DIR"' EXIT
 cp -a "$APP_DIR/." "$WORK_DIR/"
 
 if [[ -s "$WORK_DIR/init.sh" ]]; then
