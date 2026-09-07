@@ -135,13 +135,30 @@ if [[ "${PUBLISH_ALIYUN:-false}" == "true" ]]; then
   ALIYUN_IMAGE="${ALIYUN_REGISTRY}/${ALIYUN_NAMESPACE}/${APP}:${APP_VERSION}-${BUILD_ARCH}"
   echo "Mirroring $GHCR_IMAGE@$GHCR_DIGEST -> $ALIYUN_IMAGE"
 
-  skopeo copy \
-    --all \
-    --preserve-digests \
-    --src-creds "$GHCR_USER:$GHCR_TOKEN" \
-    --dest-creds "$ALIYUN_USERNAME:$ALIYUN_PASSWORD" \
-    "docker://$GHCR_IMAGE" \
-    "docker://$ALIYUN_IMAGE"
+  mirror_ok=false
+  for attempt in 1 2 3; do
+    if skopeo copy \
+      --all \
+      --preserve-digests \
+      --src-creds "$GHCR_USER:$GHCR_TOKEN" \
+      --dest-creds "$ALIYUN_USERNAME:$ALIYUN_PASSWORD" \
+      "docker://$GHCR_IMAGE" \
+      "docker://$ALIYUN_IMAGE"; then
+      mirror_ok=true
+      break
+    fi
+
+    if [[ "$attempt" -lt 3 ]]; then
+      delay=$((attempt * 5))
+      echo "Aliyun mirror attempt $attempt failed; retrying in ${delay}s" >&2
+      sleep "$delay"
+    fi
+  done
+
+  [[ "$mirror_ok" == "true" ]] || {
+    echo "Aliyun mirror failed after 3 attempts" >&2
+    exit 1
+  }
 
   ALIYUN_DIGEST="$(skopeo inspect \
     --creds "$ALIYUN_USERNAME:$ALIYUN_PASSWORD" \
