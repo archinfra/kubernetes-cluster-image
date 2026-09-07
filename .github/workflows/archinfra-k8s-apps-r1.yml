@@ -1,0 +1,136 @@
+name: Archinfra Kubernetes Cluster Apps r1
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "archinfra/**"
+      - "applications/helm/v4.2.4/**"
+      - "applications/cilium/v1.20.1/**"
+      - ".github/workflows/archinfra-k8s-apps-r1.yml"
+  push:
+    branches:
+      - main
+    paths:
+      - "archinfra/**"
+      - "applications/helm/v4.2.4/**"
+      - "applications/cilium/v1.20.1/**"
+      - ".github/workflows/archinfra-k8s-apps-r1.yml"
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: archinfra-k8s-cluster-apps-r1
+  cancel-in-progress: false
+
+env:
+  RELEASE_FILE: ${{ github.workspace }}/archinfra/releases/k8s-v1.36.4-r1.env
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate deterministic application release
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash -n archinfra/scripts/build-app.sh
+          bash -n applications/helm/v4.2.4/init.sh
+          bash -n applications/cilium/v1.20.1/init.sh
+          bash -n applications/cilium/v1.20.1/entrypoint.sh
+
+          source archinfra/releases/k8s-v1.36.4-r1.env
+          test "$RELEASE_VERSION" = "k8s-v1.36.4-r1"
+          test "$TARGET_ARCH" = "amd64"
+          test "$KUBERNETES_VERSION" = "1.36.4"
+          test "$SEALOS_VERSION" = "5.1.1"
+          test "$HELM_VERSION" = "v4.2.4"
+          test "$CILIUM_VERSION" = "v1.20.1"
+          test "$CILIUM_CLI_VERSION" = "v0.19.7"
+          test "$HUBBLE_CLI_VERSION" = "v1.19.4"
+          test "$CILIUM_KUBE_PROXY_REPLACEMENT" = "false"
+          test "$CILIUM_CHART_GIT_COMMIT" = "a0301d51baf1f88c9e27c322d1dac5fee2bc149b"
+
+          grep -F 'kubeProxyReplacement=false' applications/cilium/v1.20.1/entrypoint.sh
+          if grep -R -E 'releases/latest|/master/' applications/helm/v4.2.4 applications/cilium/v1.20.1; then
+            echo "floating source reference found in deterministic application sources" >&2
+            exit 1
+          fi
+          echo "application release lock validation OK"
+
+  build:
+    if: ${{ github.event_name != 'pull_request' }}
+    needs: validate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        app: [helm, cilium]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install deterministic build host tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            buildah \
+            skopeo \
+            jq \
+            file \
+            uidmap \
+            fuse-overlayfs \
+            ca-certificates \
+            curl
+
+          source archinfra/releases/k8s-v1.36.4-r1.env
+          test "$TARGET_ARCH" = "amd64"
+
+          curl -fsSL "$SEALOS_URL_AMD64" -o /tmp/sealos.tgz
+          echo "$SEALOS_SHA256_AMD64  /tmp/sealos.tgz" | sha256sum -c -
+          rm -rf /tmp/sealos-release
+          mkdir -p /tmp/sealos-release
+          tar -xzf /tmp/sealos.tgz -C /tmp/sealos-release
+          SEALOS_BIN="$(find /tmp/sealos-release -type f -name sealos | head -n1)"
+          test -n "$SEALOS_BIN"
+          sudo install -m 0755 "$SEALOS_BIN" /usr/local/bin/sealos
+
+          curl -fsSL "$HELM_URL_AMD64" -o /tmp/helm.tgz
+          echo "$HELM_SHA256_AMD64  /tmp/helm.tgz" | sha256sum -c -
+          rm -rf /tmp/helm-release
+          mkdir -p /tmp/helm-release
+          tar -xzf /tmp/helm.tgz -C /tmp/helm-release linux-amd64/helm
+          sudo install -m 0755 /tmp/helm-release/linux-amd64/helm /usr/local/bin/helm
+
+          sealos version
+          helm version --short
+          buildah --version
+          skopeo --version
+
+      - name: Build, publish and mirror ${{ matrix.app }} Cluster Image
+        shell: bash
+        env:
+          GHCR_USER: ${{ github.actor }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PUBLISH_ALIYUN: ${{ vars.PUBLISH_ALIYUN }}
+          ALIYUN_REGISTRY: ${{ vars.ALIYUN_REGISTRY }}
+          ALIYUN_NAMESPACE: ${{ vars.ALIYUN_NAMESPACE }}
+          ALIYUN_USERNAME: ${{ secrets.ALIYUN_USERNAME }}
+          ALIYUN_PASSWORD: ${{ secrets.ALIYUN_PASSWORD }}
+        run: bash archinfra/scripts/build-app.sh "${{ matrix.app }}" amd64
+
+      - name: Upload ${{ matrix.app }} provenance
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kubernetes-cluster-image-${{ matrix.app }}-r1-provenance
+          path: out/
+          if-no-files-found: warn
