@@ -37,6 +37,22 @@ grep -Eq '^version:[[:space:]]*1\.20\.1[[:space:]]*$' charts/cilium/Chart.yaml
 # source-only *.tmpl files are not Helm runtime inputs and may confuse image scanning.
 find charts/cilium -type f -name '*.tmpl' -exec sh -c 'mv "$1" "$1.bak"' _ {} \;
 
+# Enable Hubble (relay + UI) in the chart's values.yaml so the Sealos build's
+# image scan detects and bundles the Hubble images for offline use, and so the
+# deploy-time `cilium install` (entrypoint.sh) ships Cilium with Hubble on.
+python3 - <<'PY'
+import yaml, io
+p = 'charts/cilium/values.yaml'
+with io.open(p, encoding='utf-8') as f:
+    d = yaml.safe_load(f)
+h = d.setdefault('hubble', {})
+h.setdefault('relay', {})['enabled'] = True
+h.setdefault('ui', {})['enabled'] = True
+with io.open(p, 'w', encoding='utf-8') as f:
+    yaml.safe_dump(d, f, default_flow_style=False, sort_keys=False)
+PY
+grep -qE 'hubble' charts/cilium/values.yaml && grep -A1 'relay:' charts/cilium/values.yaml | head -2
+
 curl -fsSL "$cilium_cli_url" -o "$tmp/cilium-cli.tgz"
 echo "$cilium_cli_sha  $tmp/cilium-cli.tgz" | sha256sum -c -
 curl -fsSL "$hubble_url" -o "$tmp/hubble.tgz"
