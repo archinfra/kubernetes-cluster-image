@@ -57,88 +57,99 @@ done
 : "${GHCR_USER:?GHCR_USER is required}"
 : "${GHCR_TOKEN:?GHCR_TOKEN is required}"
 
-# The app images are standalone Sealos application images (FROM scratch); they do not
-# consume the Kubernetes runtime image as a build layer. The selected runtime digest
-# is retained in provenance to bind this app release to the independently verified
-# runtime release without requiring cross-repository GHCR package permissions here.
+log() { printf '[archinfra-cluster-image] %s\n' "$*"; }
+inspect_image() {
+  local image="$1" arch="$2" creds="$3"
+  skopeo inspect \
+    --override-os linux \
+    --override-arch "$arch" \
+    --creds "$creds" \
+    "docker://$image"
+}
 
-# Tags are release-qualified and architecture-specific so an r2 rerun cannot
-# collide with r1 or a future release using the same application version.
+# Application images are standalone Sealos images (FROM scratch). Runtime image/digest
+# is release provenance, not a build layer dependency.
 GHCR_IMAGE="${GHCR_REPOSITORY}:${APP_VERSION}-${RELEASE_VERSION}-${BUILD_ARCH}"
-WORK_DIR="$(mktemp -d)"
-# sealos build runs rootful and may create root-owned offline-registry files in WORK_DIR.
-trap 'sudo rm -rf "$WORK_DIR"' EXIT
-cp -a "$APP_DIR/." "$WORK_DIR/"
-
-if [[ -s "$WORK_DIR/init.sh" ]]; then
-  (
-    cd "$WORK_DIR"
-    bash init.sh "$BUILD_ARCH" "$APP" "$APP_VERSION"
-  )
-fi
-
-if [[ "$APP" == "cilium" && -s "$WORK_DIR/images/shim/ciliumImages" ]]; then
-  while IFS= read -r image; do
-    [[ -n "$image" ]] || continue
-    inspect="$(skopeo inspect --override-os linux --override-arch "$BUILD_ARCH" "docker://$image")"
-    image_arch="$(jq -r '.Architecture' <<<"$inspect")"
-    [[ "$image_arch" == "$BUILD_ARCH" ]] || {
-      echo "Cilium offline image lacks target architecture: image=$image expected=$BUILD_ARCH actual=$image_arch" >&2
-      exit 1
-    }
-    echo "[archinfra-cluster-image] cilium payload image OK: $image -> linux/$BUILD_ARCH"
-  done < "$WORK_DIR/images/shim/ciliumImages"
-fi
-
-if [[ -s "$WORK_DIR/Dockerfile" ]]; then
-  BUILD_FILE=Dockerfile
-elif [[ -s "$WORK_DIR/Kubefile" ]]; then
-  BUILD_FILE=Kubefile
-else
-  echo "no Dockerfile/Kubefile found for $APP" >&2
-  exit 1
-fi
-
+GHCR_CREDS="$GHCR_USER:$GHCR_TOKEN"
 mkdir -p "$ROOT/out"
 PROVENANCE="$ROOT/out/${APP}-${APP_VERSION}-${RELEASE_VERSION}-${BUILD_ARCH}.provenance.env"
 rm -f "$PROVENANCE"
 
-sudo sealos login -u "$GHCR_USER" -p "$GHCR_TOKEN" ghcr.io >/dev/null
+# Release-qualified per-arch tags are immutable. A rerun reuses the exact published
+# digest; fixes after publication require a new release revision (r3, r4, ...).
+BUILD_STATUS=VERIFIED_BUILD_ONLY
+if GHCR_INSPECT="$(inspect_image "$GHCR_IMAGE" "$BUILD_ARCH" "$GHCR_CREDS" 2>/dev/null)"; then
+  GHCR_DIGEST="$(jq -r '.Digest' <<<"$GHCR_INSPECT")"
+  GHCR_ARCH="$(jq -r '.Architecture' <<<"$GHCR_INSPECT")"
+  [[ "$GHCR_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "invalid existing GHCR digest: $GHCR_DIGEST" >&2; exit 1; }
+  [[ "$GHCR_ARCH" == "$BUILD_ARCH" ]] || {
+    echo "existing immutable image architecture mismatch: expected=$BUILD_ARCH actual=$GHCR_ARCH" >&2
+    exit 1
+  }
+  BUILD_STATUS=REUSED_IMMUTABLE
+  log "immutable tag exists; reuse: $GHCR_IMAGE@$GHCR_DIGEST"
+else
+  WORK_DIR="$(mktemp -d)"
+  # sealos build runs rootful and may create root-owned offline-registry files in WORK_DIR.
+  trap 'sudo rm -rf "$WORK_DIR"' EXIT
+  cp -a "$APP_DIR/." "$WORK_DIR/"
 
-(
-  cd "$WORK_DIR"
-  sudo sealos build \
-    -t "$GHCR_IMAGE" \
-    --isolation=chroot \
-    --platform "linux/$BUILD_ARCH" \
-    --label "io.archinfra.release=$RELEASE_VERSION" \
-    --label "io.archinfra.app=$APP" \
-    --label "io.archinfra.arch=$BUILD_ARCH" \
-    -f "$BUILD_FILE" \
-    .
-)
+  if [[ -s "$WORK_DIR/init.sh" ]]; then
+    (
+      cd "$WORK_DIR"
+      bash init.sh "$BUILD_ARCH" "$APP" "$APP_VERSION"
+    )
+  fi
 
-sudo sealos push "$GHCR_IMAGE"
+  if [[ "$APP" == "cilium" && -s "$WORK_DIR/images/shim/ciliumImages" ]]; then
+    while IFS= read -r image; do
+      [[ -n "$image" ]] || continue
+      inspect="$(skopeo inspect --override-os linux --override-arch "$BUILD_ARCH" "docker://$image")"
+      image_arch="$(jq -r '.Architecture' <<<"$inspect")"
+      [[ "$image_arch" == "$BUILD_ARCH" ]] || {
+        echo "Cilium offline image lacks target architecture: image=$image expected=$BUILD_ARCH actual=$image_arch" >&2
+        exit 1
+      }
+      log "cilium payload image OK: $image -> linux/$BUILD_ARCH"
+    done < "$WORK_DIR/images/shim/ciliumImages"
+  fi
 
-GHCR_INSPECT="$(skopeo inspect \
-  --override-os linux \
-  --override-arch "$BUILD_ARCH" \
-  --creds "$GHCR_USER:$GHCR_TOKEN" \
-  "docker://$GHCR_IMAGE")"
-GHCR_DIGEST="$(jq -r '.Digest' <<<"$GHCR_INSPECT")"
-GHCR_ARCH="$(jq -r '.Architecture' <<<"$GHCR_INSPECT")"
+  if [[ -s "$WORK_DIR/Dockerfile" ]]; then
+    BUILD_FILE=Dockerfile
+  elif [[ -s "$WORK_DIR/Kubefile" ]]; then
+    BUILD_FILE=Kubefile
+  else
+    echo "no Dockerfile/Kubefile found for $APP" >&2
+    exit 1
+  fi
 
-[[ "$GHCR_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || {
-  echo "invalid GHCR digest: $GHCR_DIGEST" >&2
-  exit 1
-}
-[[ "$GHCR_ARCH" == "$BUILD_ARCH" ]] || {
-  echo "published image architecture mismatch: expected=$BUILD_ARCH actual=$GHCR_ARCH" >&2
-  exit 1
-}
+  sudo sealos login -u "$GHCR_USER" -p "$GHCR_TOKEN" ghcr.io >/dev/null
+  (
+    cd "$WORK_DIR"
+    sudo sealos build \
+      -t "$GHCR_IMAGE" \
+      --isolation=chroot \
+      --platform "linux/$BUILD_ARCH" \
+      --label "io.archinfra.release=$RELEASE_VERSION" \
+      --label "io.archinfra.app=$APP" \
+      --label "io.archinfra.arch=$BUILD_ARCH" \
+      -f "$BUILD_FILE" \
+      .
+  )
+  sudo sealos push "$GHCR_IMAGE"
+
+  GHCR_INSPECT="$(inspect_image "$GHCR_IMAGE" "$BUILD_ARCH" "$GHCR_CREDS")"
+  GHCR_DIGEST="$(jq -r '.Digest' <<<"$GHCR_INSPECT")"
+  GHCR_ARCH="$(jq -r '.Architecture' <<<"$GHCR_INSPECT")"
+  [[ "$GHCR_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "invalid GHCR digest: $GHCR_DIGEST" >&2; exit 1; }
+  [[ "$GHCR_ARCH" == "$BUILD_ARCH" ]] || {
+    echo "published image architecture mismatch: expected=$BUILD_ARCH actual=$GHCR_ARCH" >&2
+    exit 1
+  }
+fi
 
 cat >"$PROVENANCE" <<EOF
-BUILD_STATUS=VERIFIED_BUILD_ONLY
+BUILD_STATUS=$BUILD_STATUS
 RELEASE_VERSION=$RELEASE_VERSION
 APP=$APP
 APP_VERSION=$APP_VERSION
@@ -185,49 +196,54 @@ if [[ "${PUBLISH_ALIYUN:-false}" == "true" ]]; then
   : "${ALIYUN_PASSWORD:?ALIYUN_PASSWORD is required when PUBLISH_ALIYUN=true}"
 
   ALIYUN_IMAGE="${ALIYUN_REGISTRY}/${ALIYUN_NAMESPACE}/${APP}:${APP_VERSION}-${RELEASE_VERSION}-${BUILD_ARCH}"
-  echo "Mirroring $GHCR_IMAGE@$GHCR_DIGEST -> $ALIYUN_IMAGE"
+  ALIYUN_CREDS="$ALIYUN_USERNAME:$ALIYUN_PASSWORD"
 
-  mirror_ok=false
-  for attempt in 1 2 3; do
-    if skopeo copy \
-      --all \
-      --preserve-digests \
-      --src-creds "$GHCR_USER:$GHCR_TOKEN" \
-      --dest-creds "$ALIYUN_USERNAME:$ALIYUN_PASSWORD" \
-      "docker://$GHCR_IMAGE" \
-      "docker://$ALIYUN_IMAGE"; then
-      mirror_ok=true
-      break
-    fi
+  if ALIYUN_INSPECT="$(inspect_image "$ALIYUN_IMAGE" "$BUILD_ARCH" "$ALIYUN_CREDS" 2>/dev/null)"; then
+    ALIYUN_DIGEST="$(jq -r '.Digest' <<<"$ALIYUN_INSPECT")"
+    ALIYUN_ARCH="$(jq -r '.Architecture' <<<"$ALIYUN_INSPECT")"
+    [[ "$ALIYUN_DIGEST" == "$GHCR_DIGEST" ]] || {
+      echo "ERROR: immutable Aliyun tag has different digest: GHCR=$GHCR_DIGEST Aliyun=$ALIYUN_DIGEST" >&2
+      exit 1
+    }
+    [[ "$ALIYUN_ARCH" == "$BUILD_ARCH" ]] || {
+      echo "Aliyun architecture mismatch: expected=$BUILD_ARCH actual=$ALIYUN_ARCH" >&2
+      exit 1
+    }
+    log "immutable Aliyun tag exists; reuse: $ALIYUN_IMAGE@$ALIYUN_DIGEST"
+  else
+    log "mirror immutable image: $GHCR_IMAGE@$GHCR_DIGEST -> $ALIYUN_IMAGE"
+    mirror_ok=false
+    for attempt in 1 2 3; do
+      if skopeo copy \
+        --all \
+        --preserve-digests \
+        --src-creds "$GHCR_CREDS" \
+        --dest-creds "$ALIYUN_CREDS" \
+        "docker://$GHCR_IMAGE" \
+        "docker://$ALIYUN_IMAGE"; then
+        mirror_ok=true
+        break
+      fi
+      if [[ "$attempt" -lt 3 ]]; then
+        delay=$((attempt * 5))
+        echo "Aliyun mirror attempt $attempt failed; retrying in ${delay}s" >&2
+        sleep "$delay"
+      fi
+    done
+    [[ "$mirror_ok" == "true" ]] || { echo "Aliyun mirror failed after 3 attempts" >&2; exit 1; }
 
-    if [[ "$attempt" -lt 3 ]]; then
-      delay=$((attempt * 5))
-      echo "Aliyun mirror attempt $attempt failed; retrying in ${delay}s" >&2
-      sleep "$delay"
-    fi
-  done
-
-  [[ "$mirror_ok" == "true" ]] || {
-    echo "Aliyun mirror failed after 3 attempts" >&2
-    exit 1
-  }
-
-  ALIYUN_INSPECT="$(skopeo inspect \
-    --override-os linux \
-    --override-arch "$BUILD_ARCH" \
-    --creds "$ALIYUN_USERNAME:$ALIYUN_PASSWORD" \
-    "docker://$ALIYUN_IMAGE")"
-  ALIYUN_DIGEST="$(jq -r '.Digest' <<<"$ALIYUN_INSPECT")"
-  ALIYUN_ARCH="$(jq -r '.Architecture' <<<"$ALIYUN_INSPECT")"
-
-  [[ "$ALIYUN_DIGEST" == "$GHCR_DIGEST" ]] || {
-    echo "Aliyun digest mismatch: GHCR=$GHCR_DIGEST Aliyun=$ALIYUN_DIGEST" >&2
-    exit 1
-  }
-  [[ "$ALIYUN_ARCH" == "$BUILD_ARCH" ]] || {
-    echo "Aliyun architecture mismatch: expected=$BUILD_ARCH actual=$ALIYUN_ARCH" >&2
-    exit 1
-  }
+    ALIYUN_INSPECT="$(inspect_image "$ALIYUN_IMAGE" "$BUILD_ARCH" "$ALIYUN_CREDS")"
+    ALIYUN_DIGEST="$(jq -r '.Digest' <<<"$ALIYUN_INSPECT")"
+    ALIYUN_ARCH="$(jq -r '.Architecture' <<<"$ALIYUN_INSPECT")"
+    [[ "$ALIYUN_DIGEST" == "$GHCR_DIGEST" ]] || {
+      echo "Aliyun digest mismatch: GHCR=$GHCR_DIGEST Aliyun=$ALIYUN_DIGEST" >&2
+      exit 1
+    }
+    [[ "$ALIYUN_ARCH" == "$BUILD_ARCH" ]] || {
+      echo "Aliyun architecture mismatch: expected=$BUILD_ARCH actual=$ALIYUN_ARCH" >&2
+      exit 1
+    }
+  fi
 
   cat >>"$PROVENANCE" <<EOF
 ALIYUN_MIRROR_STATUS=VERIFIED
@@ -242,7 +258,7 @@ if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
     echo "## $APP Cluster Image ($BUILD_ARCH)"
     echo
     echo "- Release: \`$RELEASE_VERSION\`"
-    echo "- Version: \`$APP_VERSION\`"
+    echo "- Build status: \`$BUILD_STATUS\`"
     echo "- GHCR: \`$GHCR_IMAGE@$GHCR_DIGEST\`"
     echo "- Platform: \`linux/$GHCR_ARCH\`"
     if [[ "${PUBLISH_ALIYUN:-false}" == "true" ]]; then
@@ -252,4 +268,4 @@ if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
 fi
 
 cat "$PROVENANCE"
-echo "[archinfra-cluster-image] SUCCESS app=$APP arch=$BUILD_ARCH image=$GHCR_IMAGE@$GHCR_DIGEST"
+log "SUCCESS app=$APP arch=$BUILD_ARCH status=$BUILD_STATUS image=$GHCR_IMAGE@$GHCR_DIGEST"
