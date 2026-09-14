@@ -35,7 +35,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Validate deterministic application release
+      - name: Validate deterministic dual-arch application release
         shell: bash
         run: |
           set -euo pipefail
@@ -55,14 +55,22 @@ jobs:
           test "$HUBBLE_CLI_VERSION" = "v1.19.4"
           test "$CILIUM_KUBE_PROXY_REPLACEMENT" = "false"
           test "$CILIUM_CHART_GIT_COMMIT" = "a0301d51baf1f88c9e27c322d1dac5fee2bc149b"
-          test "$KUBERNETES_RUNTIME_DIGEST" != ""
+
+          for v in \
+            KUBERNETES_RUNTIME_IMAGE KUBERNETES_RUNTIME_DIGEST \
+            KUBERNETES_RUNTIME_IMAGE_ARM64 KUBERNETES_RUNTIME_DIGEST_ARM64 \
+            HELM_URL_AMD64 HELM_SHA256_AMD64 HELM_URL_ARM64 HELM_SHA256_ARM64 \
+            CILIUM_CLI_URL_AMD64 CILIUM_CLI_SHA256_AMD64 CILIUM_CLI_URL_ARM64 CILIUM_CLI_SHA256_ARM64 \
+            HUBBLE_CLI_URL_AMD64 HUBBLE_CLI_SHA256_AMD64 HUBBLE_CLI_URL_ARM64 HUBBLE_CLI_SHA256_ARM64; do
+            test -n "${!v}"
+          done
 
           grep -F 'kubeProxyReplacement=false' applications/cilium/v1.20.1/entrypoint.sh
           if grep -R -E 'releases/latest|/master/' applications/helm/v4.2.4 applications/cilium/v1.20.1; then
             echo "floating source reference found in deterministic application sources" >&2
             exit 1
           fi
-          echo "application release lock validation OK"
+          echo "dual-arch application release lock validation OK"
 
   build:
     if: ${{ github.event_name != 'pull_request' }}
@@ -73,6 +81,7 @@ jobs:
       fail-fast: false
       matrix:
         app: [helm, cilium]
+        arch: [amd64, arm64]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -90,10 +99,11 @@ jobs:
             uidmap \
             fuse-overlayfs \
             ca-certificates \
-            curl
+            curl \
+            python3-yaml
 
+          # Host tools execute on the GitHub amd64 runner even for an arm64 target.
           source archinfra/releases/k8s-v1.36.4-r2.env
-          test "$TARGET_ARCH" = "amd64"
 
           curl -fsSL "$SEALOS_URL_AMD64" -o /tmp/sealos.tgz
           echo "$SEALOS_SHA256_AMD64  /tmp/sealos.tgz" | sha256sum -c -
@@ -116,7 +126,7 @@ jobs:
           buildah --version
           skopeo --version
 
-      - name: Build, publish and mirror ${{ matrix.app }} Cluster Image
+      - name: Build, verify, publish and mirror ${{ matrix.app }} ${{ matrix.arch }} Cluster Image
         shell: bash
         env:
           GHCR_USER: ${{ github.actor }}
@@ -126,12 +136,12 @@ jobs:
           ALIYUN_NAMESPACE: ${{ vars.ALIYUN_NAMESPACE }}
           ALIYUN_USERNAME: ${{ secrets.ALIYUN_USERNAME }}
           ALIYUN_PASSWORD: ${{ secrets.ALIYUN_PASSWORD }}
-        run: bash archinfra/scripts/build-app.sh "${{ matrix.app }}" amd64
+        run: bash archinfra/scripts/build-app.sh "${{ matrix.app }}" "${{ matrix.arch }}"
 
-      - name: Upload ${{ matrix.app }} provenance
+      - name: Upload ${{ matrix.app }} ${{ matrix.arch }} provenance
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: kubernetes-cluster-image-${{ matrix.app }}-r2-provenance
+          name: kubernetes-cluster-image-${{ matrix.app }}-r2-${{ matrix.arch }}-provenance
           path: out/
           if-no-files-found: warn

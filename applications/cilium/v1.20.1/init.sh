@@ -63,6 +63,28 @@ tar -xzf "$tmp/cilium-cli.tgz" -C opt cilium
 tar -xzf "$tmp/hubble.tgz" -C opt hubble
 chmod 0755 opt/cilium opt/hubble
 
-# Hashes are the identity check; these executions additionally prove the binaries run on the target architecture.
-opt/cilium version --client >/dev/null
-opt/hubble version >/dev/null
+for binary in cilium hubble; do
+  desc="$(file "opt/$binary")"
+  echo "[archinfra-cluster-image] $binary binary: $desc"
+  case "$ARCH" in
+    amd64)
+      printf '%s\n' "$desc" | grep -Eiq 'x86-64|x86_64' || {
+        echo "$binary is not amd64" >&2
+        exit 1
+      }
+      ;;
+    arm64)
+      printf '%s\n' "$desc" | grep -Eiq 'ARM aarch64|ARM64|aarch64' || {
+        echo "$binary is not arm64" >&2
+        exit 1
+      }
+      ;;
+  esac
+done
+
+# Only execute target binaries when they match the amd64 GitHub host. ARM64
+# payloads are verified by pinned source hashes plus ELF architecture above.
+if [[ "$ARCH" == "amd64" ]]; then
+  opt/cilium version --client >/dev/null
+  opt/hubble version >/dev/null
+fi
