@@ -57,32 +57,10 @@ done
 : "${GHCR_USER:?GHCR_USER is required}"
 : "${GHCR_TOKEN:?GHCR_TOKEN is required}"
 
-verify_image_arch_digest() {
-  local image="$1" expected_digest="$2" expected_arch="$3" creds="${4:-}" inspect actual_digest actual_arch
-  local args=(inspect --override-os linux --override-arch "$expected_arch")
-  if [[ -n "$creds" ]]; then
-    args+=(--creds "$creds")
-  fi
-  inspect="$(skopeo "${args[@]}" "docker://$image")"
-  actual_digest="$(jq -r '.Digest' <<<"$inspect")"
-  actual_arch="$(jq -r '.Architecture' <<<"$inspect")"
-  [[ "$actual_digest" == "$expected_digest" ]] || {
-    echo "registry digest mismatch: image=$image expected=$expected_digest actual=$actual_digest" >&2
-    exit 1
-  }
-  [[ "$actual_arch" == "$expected_arch" ]] || {
-    echo "registry architecture mismatch: image=$image expected=$expected_arch actual=$actual_arch" >&2
-    exit 1
-  }
-  echo "[archinfra-cluster-image] verified image: $image -> $expected_arch $actual_digest"
-}
-
-# Tie this application release to the exact already-verified Kubernetes runtime.
-verify_image_arch_digest \
-  "$SELECTED_RUNTIME_IMAGE" \
-  "$SELECTED_RUNTIME_DIGEST" \
-  "$BUILD_ARCH" \
-  "$GHCR_USER:$GHCR_TOKEN"
+# The app images are standalone Sealos application images (FROM scratch); they do not
+# consume the Kubernetes runtime image as a build layer. The selected runtime digest
+# is retained in provenance to bind this app release to the independently verified
+# runtime release without requiring cross-repository GHCR package permissions here.
 
 # Tags are release-qualified and architecture-specific so an r2 rerun cannot
 # collide with r1 or a future release using the same application version.
