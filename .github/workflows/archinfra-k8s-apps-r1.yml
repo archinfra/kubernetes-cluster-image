@@ -1,21 +1,8 @@
 name: Archinfra Kubernetes Cluster Apps r1
 
+# Historical release: frozen from automatic rebuilds. Re-run only by explicit dispatch.
 on:
   workflow_dispatch:
-  pull_request:
-    paths:
-      - "archinfra/**"
-      - "applications/helm/v4.2.4/**"
-      - "applications/cilium/v1.20.1/**"
-      - ".github/workflows/archinfra-k8s-apps-r1.yml"
-  push:
-    branches:
-      - main
-    paths:
-      - "archinfra/**"
-      - "applications/helm/v4.2.4/**"
-      - "applications/cilium/v1.20.1/**"
-      - ".github/workflows/archinfra-k8s-apps-r1.yml"
 
 permissions:
   contents: read
@@ -64,7 +51,6 @@ jobs:
           echo "application release lock validation OK"
 
   build:
-    if: ${{ github.event_name != 'pull_request' }}
     needs: validate
     runs-on: ubuntu-24.04
     timeout-minutes: 90
@@ -89,7 +75,8 @@ jobs:
             uidmap \
             fuse-overlayfs \
             ca-certificates \
-            curl
+            curl \
+            python3-yaml
 
           source archinfra/releases/k8s-v1.36.4-r1.env
           test "$TARGET_ARCH" = "amd64"

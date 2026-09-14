@@ -4,7 +4,9 @@ on:
   workflow_dispatch:
   pull_request:
     paths:
-      - "archinfra/**"
+      - "archinfra/releases/k8s-v1.36.4-r2.env"
+      - "archinfra/scripts/build-app.sh"
+      - "archinfra/scripts/publish-app-manifest.sh"
       - "applications/helm/v4.2.4/**"
       - "applications/cilium/v1.20.1/**"
       - ".github/workflows/archinfra-k8s-apps-r2.yml"
@@ -12,7 +14,9 @@ on:
     branches:
       - main
     paths:
-      - "archinfra/**"
+      - "archinfra/releases/k8s-v1.36.4-r2.env"
+      - "archinfra/scripts/build-app.sh"
+      - "archinfra/scripts/publish-app-manifest.sh"
       - "applications/helm/v4.2.4/**"
       - "applications/cilium/v1.20.1/**"
       - ".github/workflows/archinfra-k8s-apps-r2.yml"
@@ -40,6 +44,7 @@ jobs:
         run: |
           set -euo pipefail
           bash -n archinfra/scripts/build-app.sh
+          bash -n archinfra/scripts/publish-app-manifest.sh
           bash -n applications/helm/v4.2.4/init.sh
           bash -n applications/cilium/v1.20.1/init.sh
           bash -n applications/cilium/v1.20.1/entrypoint.sh
@@ -143,5 +148,50 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: kubernetes-cluster-image-${{ matrix.app }}-r2-${{ matrix.arch }}-provenance
+          path: out/
+          if-no-files-found: warn
+
+  manifest:
+    if: ${{ github.event_name != 'pull_request' }}
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        app: [helm, cilium]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Install manifest verification tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends skopeo jq
+          docker buildx version
+          skopeo --version
+
+      - name: Publish and verify ${{ matrix.app }} multi-arch manifest
+        shell: bash
+        env:
+          GHCR_USER: ${{ github.actor }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PUBLISH_ALIYUN: ${{ vars.PUBLISH_ALIYUN }}
+          ALIYUN_REGISTRY: ${{ vars.ALIYUN_REGISTRY }}
+          ALIYUN_NAMESPACE: ${{ vars.ALIYUN_NAMESPACE }}
+          ALIYUN_USERNAME: ${{ secrets.ALIYUN_USERNAME }}
+          ALIYUN_PASSWORD: ${{ secrets.ALIYUN_PASSWORD }}
+        run: bash archinfra/scripts/publish-app-manifest.sh "${{ matrix.app }}"
+
+      - name: Upload ${{ matrix.app }} multi-arch provenance
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kubernetes-cluster-image-${{ matrix.app }}-r2-multiarch-provenance
           path: out/
           if-no-files-found: warn
